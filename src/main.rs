@@ -7,7 +7,7 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use sqlx::{sqlite3::sqlitePool, Row, Executor, Transaction};
+use sqlx::{sqlite::SqlitePool, Row, Executor, Transaction};
 use std::{net::SocketAddr, sync::Arc};
 use tracing::{info, error};
 use tracing_subscriber::EnvFilter;
@@ -16,10 +16,15 @@ use uuid::Uuid;
 use thiserror::Error;
 use tower_http::cors::{Any, CorsLayer};
 use chrono::Utc;
+use serde_json::json;
 
 #[derive(Clone)]
 struct AppState {
-    pool: sqlitePool,
+    pool: SqlitePool,
+}
+
+macro_rules! json {
+    ($($tt:tt)*) => { serde_json::json!($($tt)*) };
 }
 
 // ---------- Models ----------
@@ -83,7 +88,7 @@ impl IntoResponse for AppError {
             AppError::NotFound => (StatusCode::NOT_FOUND, Json(json!({"error": "Not Found"}))),
             AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, Json(json!({"error": msg}))),
             AppError::DbError(e) => {
-                error!("db error: %s", e);
+                error!("db error: {}", e);
                 (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "Database error"})))
             }
             AppError::InternalError => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "Internal error"}))),
@@ -93,9 +98,6 @@ impl IntoResponse for AppError {
 }
 
 // A small helper macro (since we didn't import serde_json::json directly in scope)
-macro_rules! json {
-    ($($tt:tt)*) => { serde_json::json!($($tt)*) };
-}
 
 // ---------- Handlers ----------
 
@@ -157,7 +159,7 @@ async fn create_product(State(state): State<Arc<AppState>>, Json(payload): Json<
         .execute(&mut tx)
         .await?;
 
-    // For sqlite3 we can get the last insert id
+    // For sqlite we can get the last insert id
     let inserted_id = res.last_insert_rowid();
 
     tx.commit().await?;
@@ -230,7 +232,7 @@ async fn create_order(State(state): State<Arc<AppState>>, Json(payload): Json<Cr
     }
 
     // Start a transaction so stock checks and updates are atomic
-    let mut tx: Transaction<'_, sqlx::sqlite3> = state.pool.begin().await?;
+    let mut tx: Transaction<'_, sqlx::Sqlite> = state.pool.begin().await?;
 
     // We'll calculate total and modify stock
     let mut total_cents: i64 = 0;
@@ -330,7 +332,7 @@ async fn get_order(Path(id): Path<String>, State(state): State<Arc<AppState>>) -
 }
 
 // ---------- DB init ----------
-async fn init_db(pool: &sqlite3Pool) -> Result<(), sqlx::Error> {
+async fn init_db(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     // Note: using IF NOT EXISTS allows running this at startup without external migration tool.
     let mut conn = pool.acquire().await?;
 
@@ -377,10 +379,10 @@ async fn main() -> Result<(), anyhow::Error> {
         .with_env_filter(EnvFilter::from_default_env())
         .init();
 
-    let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite3://ecom.db".into());
-    info!("Connecting to database at %s", database_url);
+    let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite://ecom.db".into());
+    info!("Connecting to database at {}", database_url);
 
-    let pool = sqlite3Pool::connect(&database_url).await?;
+    let pool = SqlitePool::connect(&database_url).await?;
     init_db(&pool).await?;
 
     let app_state = Arc::new(AppState { pool });
@@ -396,7 +398,7 @@ async fn main() -> Result<(), anyhow::Error> {
         .layer(cors);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
-    info!("Listening on http://%s", addr);
+    info!("Listening on http://{}", addr);
     axum::Server::bind(&addr)
         .serve(app.into_make_service())
         .await
@@ -412,7 +414,7 @@ async fn main() -> Result<(), anyhow::Error> {
 // - To run:
 //   1. create a new cargo project: `cargo new ecom-backend --bin`
 //   2. paste Cargo.toml deps and save this file to src/main.rs
-//   3. (optional) create a `.env` with `DATABASE_URL=sqlite3://./ecom.db` and `RUST_LOG=info`
+//   3. (optional) create a `.env` with `DATABASE_URL=sqlite://./ecom.db` and `RUST_LOG=info`
 //   4. run: `cargo run`
 // - Quick curl examples:
 //   * Create a product:
