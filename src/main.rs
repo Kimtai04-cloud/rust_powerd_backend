@@ -26,8 +26,6 @@ macro_rules! json {
     ($($tt:tt)*) => { serde_json::json!($($tt)*) };
 }
 
-// ---------- Models ----------
-
 #[derive(Debug, Serialize, Deserialize)]
 struct Product {
     id: i64,
@@ -71,8 +69,6 @@ struct OrderResponse {
     total_cents: i64,
 }
 
-// ---------- Error handling ----------
-
 #[derive(Error, Debug)]
 enum AppError {
     #[error("Not found")] NotFound,
@@ -95,10 +91,6 @@ impl IntoResponse for AppError {
         (status, body).into_response()
     }
 }
-
-// A small helper macro (since we didn't import serde_json::json directly in scope)
-
-// ---------- Handlers ----------
 
 async fn list_products(State(state): State<Arc<AppState>>) -> Result<Json<Vec<Product>>, AppError> {
     let rows = sqlx::query("SELECT id, name, description, price_cents, stock, created_at FROM products ORDER BY id DESC")
@@ -140,7 +132,6 @@ async fn get_product(Path(id): Path<i64>, State(state): State<Arc<AppState>>) ->
 }
 
 async fn create_product(State(state): State<Arc<AppState>>, Json(payload): Json<CreateProduct>) -> Result<(StatusCode, Json<Product>), AppError> {
-    // basic validations
     if payload.name.trim().is_empty() {
         return Err(AppError::BadRequest("name must not be empty".into()));
     }
@@ -155,15 +146,13 @@ async fn create_product(State(state): State<Arc<AppState>>, Json(payload): Json<
         .bind(payload.price_cents)
         .bind(payload.stock)
         .bind(&now)
-        .execute(tx.as_mut())  // Use tx.as_mut() to properly pass transaction as executor
+        .execute(tx.as_mut())  
         .await?;
 
-    // For sqlite we can get the last insert id
     let inserted_id = res.last_insert_rowid();
 
     tx.commit().await?;
 
-    // fetch created
     let row = sqlx::query("SELECT id, name, description, price_cents, stock, created_at FROM products WHERE id = ?")
         .bind(inserted_id)
         .fetch_one(&state.pool)
@@ -197,7 +186,6 @@ async fn update_product(Path(id): Path<i64>, State(state): State<Arc<AppState>>,
 
     tx.commit().await?;
 
-    // return updated
     let row = sqlx::query("SELECT id, name, description, price_cents, stock, created_at FROM products WHERE id = ?")
         .bind(id)
         .fetch_optional(&state.pool)
@@ -229,14 +217,10 @@ async fn create_order(State(state): State<Arc<AppState>>, Json(payload): Json<Cr
     if payload.items.is_empty() {
         return Err(AppError::BadRequest("order must contain at least one item".into()));
     }
-
-    // Start a transaction so stock checks and updates are atomic
     let mut tx: Transaction<'_, sqlx::Sqlite> = state.pool.begin().await?;
 
-    // We'll calculate total and modify stock
     let mut total_cents: i64 = 0;
 
-    // Step 1: Check stock and compute total
     for item in &payload.items {
         let row = sqlx::query("SELECT stock, price_cents FROM products WHERE id = ?")
             .bind(item.product_id)
@@ -258,7 +242,6 @@ async fn create_order(State(state): State<Arc<AppState>>, Json(payload): Json<Cr
         total_cents += (item.quantity as i64) * unit_price;
     }
 
-    // Step 2: insert order
     let order_id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
     sqlx::query("INSERT INTO orders (id, total_cents, created_at) VALUES (?, ?, ?)")
@@ -268,9 +251,7 @@ async fn create_order(State(state): State<Arc<AppState>>, Json(payload): Json<Cr
         .execute(tx.as_mut())  // Use tx.as_mut() for transaction executor
         .await?;
 
-    // Step 3: insert order items and decrement stock
     for item in &payload.items {
-        // get current price to freeze at time of order
         let row = sqlx::query("SELECT price_cents FROM products WHERE id = ?")
             .bind(item.product_id)
             .fetch_one(tx.as_mut())  // Use tx.as_mut() for transaction executor
@@ -330,9 +311,7 @@ async fn get_order(Path(id): Path<String>, State(state): State<Arc<AppState>>) -
     }
 }
 
-// ---------- DB init ----------
-async fn init_db(pool: &SqlitePool) -> Result<(), sqlx::Error> {
-    // Note: using IF NOT EXISTS allows running this at startup without external migration tool.
+async fn init_db(pool: &SqlitePool) -> Result<(), sqlx::Error> {.
     let mut conn = pool.acquire().await?;
 
     conn.execute(
@@ -369,7 +348,6 @@ async fn init_db(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
-// ---------- Main ----------
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenv().ok();
@@ -398,7 +376,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
     info!("Listening on http://{}", addr);
     
-    // Axum 0.7+ uses tokio::net::TcpListener instead of axum::Server
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     axum::serve(listener, app).await?;
 
