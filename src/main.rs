@@ -3,7 +3,7 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::{get, post, put, delete},
+    routing::{get, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
@@ -14,7 +14,6 @@ use tracing_subscriber::EnvFilter;
 use dotenvy::dotenv;
 use uuid::Uuid;
 use thiserror::Error;
-use tower_http::cors::{Any, CorsLayer};
 use chrono::Utc;
 use serde_json::json;
 
@@ -156,7 +155,7 @@ async fn create_product(State(state): State<Arc<AppState>>, Json(payload): Json<
         .bind(payload.price_cents)
         .bind(payload.stock)
         .bind(&now)
-        .execute(&mut tx)
+        .execute(tx.as_mut())  // Use tx.as_mut() to properly pass transaction as executor
         .await?;
 
     // For sqlite we can get the last insert id
@@ -193,7 +192,7 @@ async fn update_product(Path(id): Path<i64>, State(state): State<Arc<AppState>>,
     .bind(payload.price_cents)
     .bind(payload.stock)
     .bind(id)
-    .execute(&mut tx)
+    .execute(tx.as_mut())  // Use tx.as_mut() for transaction executor
     .await?;
 
     tx.commit().await?;
@@ -241,7 +240,7 @@ async fn create_order(State(state): State<Arc<AppState>>, Json(payload): Json<Cr
     for item in &payload.items {
         let row = sqlx::query("SELECT stock, price_cents FROM products WHERE id = ?")
             .bind(item.product_id)
-            .fetch_optional(&mut tx)
+            .fetch_optional(tx.as_mut())  // Use tx.as_mut() for transaction executor
             .await?;
 
         let row = match row {
@@ -266,7 +265,7 @@ async fn create_order(State(state): State<Arc<AppState>>, Json(payload): Json<Cr
         .bind(&order_id)
         .bind(total_cents)
         .bind(&now)
-        .execute(&mut tx)
+        .execute(tx.as_mut())  // Use tx.as_mut() for transaction executor
         .await?;
 
     // Step 3: insert order items and decrement stock
@@ -274,7 +273,7 @@ async fn create_order(State(state): State<Arc<AppState>>, Json(payload): Json<Cr
         // get current price to freeze at time of order
         let row = sqlx::query("SELECT price_cents FROM products WHERE id = ?")
             .bind(item.product_id)
-            .fetch_one(&mut tx)
+            .fetch_one(tx.as_mut())  // Use tx.as_mut() for transaction executor
             .await?;
         let unit_price: i64 = row.get("price_cents");
 
@@ -283,13 +282,13 @@ async fn create_order(State(state): State<Arc<AppState>>, Json(payload): Json<Cr
             .bind(item.product_id)
             .bind(item.quantity)
             .bind(unit_price)
-            .execute(&mut tx)
+            .execute(tx.as_mut())  // Use tx.as_mut() for transaction executor
             .await?;
 
         sqlx::query("UPDATE products SET stock = stock - ? WHERE id = ?")
             .bind(item.quantity)
             .bind(item.product_id)
-            .execute(&mut tx)
+            .execute(tx.as_mut())  // Use tx.as_mut() for transaction executor
             .await?;
     }
 
@@ -372,7 +371,7 @@ async fn init_db(pool: &SqlitePool) -> Result<(), sqlx::Error> {
 
 // ---------- Main ----------
 #[tokio::main]
-async fn main() -> Result<(), anyhow::Error> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenv().ok();
 
     tracing_subscriber::fmt()
@@ -387,41 +386,22 @@ async fn main() -> Result<(), anyhow::Error> {
 
     let app_state = Arc::new(AppState { pool });
 
-    let cors = CorsLayer::new().allow_origin(Any).allow_methods(Any);
-
+    // Simple router configuration without CORS for simplicity
+    // CORS can be added later if needed for frontend integration
     let app = Router::new()
         .route("/api/v1/products", get(list_products).post(create_product))
         .route("/api/v1/products/:id", get(get_product).put(update_product).delete(delete_product))
         .route("/api/v1/orders", post(create_order))
         .route("/api/v1/orders/:id", get(get_order))
-        .with_state(Arc::clone(&app_state))
-        .layer(cors);
+        .with_state(Arc::clone(&app_state));
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
     info!("Listening on http://{}", addr);
-    axum::Server::bind(&addr)
-        .serve(app.into_make_service())
-        .await
-        .unwrap();
+    
+    // Axum 0.7+ uses tokio::net::TcpListener instead of axum::Server
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
+    axum::serve(listener, app).await?;
 
     Ok(())
 }
 
-// ----------------------------------------
-// Notes:
-// - This is a single-file, beginner-friendly snapshot. In real projects split code into modules like
-//   `routes`, `handlers`, `models`, `db`, `errors` and add unit/integration tests.
-// - To run:
-//   1. create a new cargo project: `cargo new ecom-backend --bin`
-//   2. paste Cargo.toml deps and save this file to src/main.rs
-//   3. (optional) create a `.env` with `DATABASE_URL=sqlite://./ecom.db` and `RUST_LOG=info`
-//   4. run: `cargo run`
-// - Quick curl examples:
-//   * Create a product:
-//     curl -X POST http://127.0.0.1:3000/api/v1/products -H "Content-Type: application/json" \
-//       -d '{"name":"T-shirt","description":"A comfy tee","price_cents":1999,"stock":100}'
-//   * List products: `curl http://127.0.0.1:3000/api/v1/products`
-//   * Create an order (use real product ids from list):
-//     curl -X POST http://127.0.0.1:3000/api/v1/orders -H "Content-Type: application/json" \
-//       -d '{"items":[{"product_id":1,"quantity":2}]}'
-// ----------------------------------------
